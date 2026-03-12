@@ -1,5 +1,7 @@
 streamlit
 requests
 pandas
-moviepy==1.0.3
+imageio
 imageio-ffmpeg
+pillow
+numpy
