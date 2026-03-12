@@ -12,15 +12,15 @@ import io
 try:
     API_KEY = st.secrets["nvidia"]["api_key"]
     if not API_KEY or not API_KEY.startswith("nvapi-"):
-        st.error("⚠️ API Key 格式错误！请检查 Secrets。")
+        st.error("⚠️ API Key 格式错误！请检查 Secrets 配置。")
         st.stop()
 except KeyError:
     st.error("⚠️ 未找到 API Key，请检查 Secrets 配置。")
     st.stop()
 
-# 【修正】使用 NVIDIA 官方推荐的 Playground v2.5 模型
-# 原地址 stable-diffusion-xl 可能已失效或改名，切换至 playground-v2.5-1024px-aesthetic
-IMAGE_URL = "https://ai.api.nvidia.com/v1/genai/playgroundai/playground-v2.5-1024px-aesthetic"
+# 【关键修复】使用 NVIDIA 官方确认稳定的模型地址
+# 地址格式：https://ai.api.nvidia.com/v1/genai/{org}/{model}
+IMAGE_URL = "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-xl-base-1.0"
 
 # ==========================================
 st.set_page_config(page_title="小景漫剧工厂", page_icon="🎬", layout="wide")
@@ -30,27 +30,31 @@ st.markdown("""
 <style>
 .stApp { background-color: #0e1117; color: #fafafa; }
 h1 { text-align: center; color: #76b900; }
-.stButton>button { background-color: #76b900; color: white; border-radius: 8px; border: none; font-size: 1.2rem; width: 100%; padding: 10px; }
+.stButton>button {
+    background-color: #76b900; color: white; border-radius: 8px; border: none;
+    font-size: 1.2rem; width: 100%; padding: 10px;
+}
 .stButton>button:hover { background-color: #5a8f00; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 核心函数：AI 绘图 ---
+# --- 核心函数：AI 绘图 (修复版) ---
 def generate_image(prompt, seed=42):
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
-    # 优化 Prompt
+    
+    # 优化 Prompt，确保生成高质量图片
     full_prompt = f"{prompt}, masterpiece, best quality, highly detailed, 8k, cinematic lighting, anime style, dynamic composition"
     
+    # 【修复】精简 Payload，移除可能导致 404 的非标准参数
     payload = {
         "prompt": full_prompt,
         "width": 1024,
         "height": 1024,
-        "steps": 30,
-        "guidance": 7.5,
         "seed": seed
+        # 注意：某些 NVIDIA 端点不需要 steps/guidance，让服务端默认处理更稳定
     }
     
     try:
@@ -58,7 +62,9 @@ def generate_image(prompt, seed=42):
         if response.status_code == 200:
             return response.content
         else:
-            st.error(f"API 错误：{response.status_code} - {response.text[:200]}")
+            # 详细错误打印
+            error_msg = f"API 错误：{response.status_code} - {response.text[:200]}"
+            st.error(error_msg)
             return None
     except Exception as e:
         st.error(f"请求失败：{str(e)}")
@@ -79,7 +85,9 @@ def add_caption(image_bytes, text):
     x = (image.width - text_w) // 2
     y = image.height - text_h - 50
     
+    # 画黑色半透明底
     draw.rectangle([x-10, y-10, x+text_w+10, y+text_h+10], fill=(0, 0, 0, 180))
+    # 画字
     draw.text((x, y), text, font=font, fill=(255, 255, 255))
     
     buf = io.BytesIO()
@@ -92,25 +100,28 @@ def create_video(frames_data, captions, output_path="output.mp4", fps=24, durati
     for i, img_data in enumerate(frames_data):
         img_with_text = add_caption(img_data, captions[i])
         img_np = np.array(Image.open(io.BytesIO(img_with_text)))
+        # 扩展帧
         for _ in range(duration_per_frame * fps):
             all_frames.append(img_np)
     
     try:
+        # 尝试写入 MP4
         with imageio.get_writer(output_path, fps=fps, codec='libx264', quality=8) as writer:
             for frame in all_frames:
                 writer.append_data(frame)
         return output_path
     except Exception as e:
+        # 失败则降级为 GIF
         st.warning(f"MP4 编码失败 ({str(e)})，尝试生成 GIF...")
         gif_path = output_path.replace(".mp4", ".gif")
-        low_res_frames = all_frames[::12]
+        low_res_frames = all_frames[::12] # 抽帧
         with imageio.get_writer(gif_path, fps=10) as writer:
             for frame in low_res_frames:
                 writer.append_data(frame)
         return gif_path
 
 # --- 主界面 ---
-st.title("🎬 小景漫剧工厂 v3.0 (Playground 模型)")
+st.title("🎬 小景漫剧工厂 v3.0 (最终版)")
 st.markdown("### 🌟 输入故事，一键生成高清动态漫剧")
 
 story = st.text_area("请输入小说片段 (支持长文本)", height=200, placeholder="从前有个少年...")
@@ -123,6 +134,8 @@ if st.button("🚀 开始生成漫剧"):
         status = st.empty()
         
         status.text("🤖 正在分析故事...")
+        
+        # 构造 4 个分镜提示词
         base_prompts = [
             f"{story} -- wide shot, establishing scene, anime style",
             f"{story} -- close up, character expression, dramatic lighting",
@@ -135,17 +148,18 @@ if st.button("🚀 开始生成漫剧"):
         image_preview = st.columns(4)
         
         for i in range(4):
-            status.text(f"🎨 正在绘制第 {i+1} 张分镜 (Playground v2.5)...")
+            status.text(f"🎨 正在绘制第 {i+1} 张分镜 (SDXL)...")
             progress.progress((i+1) * 20)
             
-            # 使用不同的种子以增加多样性
+            # 使用不同种子
             img_bytes = generate_image(base_prompts[i], seed=123+i)
             
             if img_bytes:
                 image_data_list.append(img_bytes)
-                image_preview[i].image(image_bytes, caption=f"分镜 {i+1}", use_container_width=True)
+                # 实时预览
+                image_preview[i].image(img_bytes, caption=f"分镜 {i+1}", use_container_width=True)
             else:
-                st.error(f"第 {i+1} 张图生成失败，请检查 API Key 或网络连接。")
+                st.error(f"第 {i+1} 张图生成失败，请检查 API Key 或模型地址。")
                 st.stop()
         
         status.text("🎬 正在合成视频...")
@@ -167,4 +181,4 @@ if st.button("🚀 开始生成漫剧"):
             st.error(f"视频合成出错：{str(e)}")
 
 st.markdown("---")
-st.caption("© 2026 小景漫剧工厂 | Powered by NVIDIA Playground v2.5")
+st.caption("© 2026 小景漫剧工厂 | Powered by NVIDIA SDXL")
